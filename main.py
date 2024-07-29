@@ -3,7 +3,7 @@ from tkinter import filedialog, messagebox
 import librosa
 import numpy as np
 import soundfile as sf
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import SVC
 import pyaudio
@@ -14,8 +14,6 @@ class SpeakerIDApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Speaker Identification")
-        
-        self.root.geometry("300x300")
         
         self.label_frame = tk.Frame(root)
         self.label_frame.pack(pady=10)
@@ -67,39 +65,72 @@ class SpeakerIDApp:
         return np.mean(mfccs.T, axis=0)
     
     def train_model(self):
+        if len(set(self.label_list)) < 2:
+            messagebox.showwarning("Warning", "Need at least two different labels to train the model")
+            return
+
         if not self.file_list:
             messagebox.showwarning("Warning", "No files to train on")
             return
-        
+
         wav_files = []
         for mp3_file in self.file_list:
             wav_file = mp3_file.replace(".mp3", ".wav")
             self.convert_mp3_to_wav(mp3_file, wav_file)
             wav_files.append(wav_file)
-        
+
         self.features = [self.extract_mfcc(wav) for wav in wav_files]
         self.labels = self.label_list
-        
-        # Ensuring there are at least two different labels
-        unique_labels = set(self.labels)
-        if len(unique_labels) < 2:
-            messagebox.showwarning("Warning", "Need at least two different labels to train the model")
+
+        # Convert features and labels to numpy arrays for easier manipulation
+        X = np.array(self.features)
+        y = np.array(self.labels)
+
+        # Check if any class has fewer than 2 samples
+        unique_labels, label_counts = np.unique(y, return_counts=True)
+        if any(count < 2 for count in label_counts):
+            messagebox.showwarning("Warning", "Some classes have fewer than 2 samples. Please provide more data.")
             return
-        
-        X_train, X_test, y_train, y_test = train_test_split(self.features, self.labels, test_size=0.2, random_state=42)
-        
+
+        try:
+            # Attempt stratified split
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+            split = sss.split(X, y)
+            train_index, test_index = next(split)
+            X_train, X_test = X[train_index], X[test_index]
+            y_train, y_test = y[train_index], y[test_index]
+        except ValueError as e:
+            # If stratified split fails, fallback to regular train_test_split
+            print("Stratified split failed, falling back to regular split:", e)
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
         self.le = LabelEncoder()
-        y_train = self.le.fit_transform(y_train)
-        
-        # Making sure the test labels are known in the training data
-        y_test = self.le.transform([label if label in self.le.classes_ else self.le.classes_[0] for label in y_test])
-        
+        self.le.fit(self.labels)
+        y_train = self.le.transform(y_train)
+        y_test = self.le.transform(y_test)
+
+        # Print label distributions after splitting
+        print("Training labels distribution:")
+        unique_train_labels, train_counts = np.unique(y_train, return_counts=True)
+        for label, count in zip(unique_train_labels, train_counts):
+            print(f"{self.le.inverse_transform([label])[0]}: {count}")
+
+        print("Test labels distribution:")
+        unique_test_labels, test_counts = np.unique(y_test, return_counts=True)
+        for label, count in zip(unique_test_labels, test_counts):
+            print(f"{self.le.inverse_transform([label])[0]}: {count}")
+
+        if len(unique_train_labels) < 2 or len(unique_test_labels) < 2:
+            messagebox.showwarning("Warning", "The split resulted in fewer than 2 classes in either the training or testing set")
+            return
+
         self.model = SVC(kernel='linear', probability=True)
         self.model.fit(X_train, y_train)
-        
+
         accuracy = self.model.score(X_test, y_test)
         messagebox.showinfo("Model Trained", f"Model trained with accuracy: {accuracy}")
-    
+
+
     def predict_from_file(self):
         if self.model is None:
             messagebox.showwarning("Warning", "Please train the model first")
